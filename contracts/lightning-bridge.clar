@@ -30,6 +30,15 @@
 (define-constant MIN-BALANCE u0)
 (define-constant MAX-MESSAGE-LENGTH u1024)
 
+;; Reverse lookup for channels by participant and channel-id
+(define-map channel-participants
+  { channel-id: (buff 32), participant: principal }
+  { 
+    other-participant: principal,
+    is-participant-a: bool
+  }
+)
+
 ;; DATA STRUCTURES
 
 ;; Primary channel state mapping
@@ -310,6 +319,16 @@
       }
     )
 
+    ;; Create reverse lookup entries
+    (map-set channel-participants
+      { channel-id: channel-id, participant: tx-sender }
+      { other-participant: participant-b, is-participant-a: true }
+    )
+    (map-set channel-participants
+      { channel-id: channel-id, participant: participant-b }
+      { other-participant: tx-sender, is-participant-a: false }
+    )
+
     (ok true)
   )
 )
@@ -488,7 +507,7 @@
   )
 )
 
-;; Challenge mechanism for disputed states - Secure version
+;; Challenge mechanism for disputed states - Secure version using reverse lookup
 (define-public (challenge-unilateral-close
   (channel-id (buff 32))
   (newer-balance-a uint)
@@ -498,27 +517,64 @@
 )
   (let 
     (
-      ;; Find channel where tx-sender is participant-b
-      ;; We iterate through potential participant-a values by using a different approach
-      ;; Since we can't iterate, we'll use the stored pubkey mapping to validate
-      (potential-channels (filter 
-        (lambda (entry) 
-          (let ((channel-key (get key entry))
-                (channel-data (get value entry)))
-            (and 
-              (is-eq (get channel-id channel-key) channel-id)
-              (is-eq (get participant-b channel-key) tx-sender)
-              (> (get dispute-deadline channel-data) stacks-block-height)
-            )
-          )
-        )
-        ;; Note: This approach has limitations in Clarity
-        ;; Better to use a more direct lookup method
+      ;; Use reverse lookup to find the channel safely
+      (participant-info (unwrap! 
+        (map-get? channel-participants {
+          channel-id: channel-id, 
+          participant: tx-sender
+        })
+        ERR-CHANNEL-NOT-FOUND
       ))
+      (other-participant (get other-participant participant-info))
+      (is-caller-participant-a (get is-participant-a participant-info))
+      ;; Determine correct participant order for channel lookup
+      (participant-a (if is-caller-participant-a tx-sender other-participant))
+      (participant-b (if is-caller-participant-a other-participant tx-sender))
+      ;; Get the actual channel data
+      (channel (unwrap! 
+        (map-get? payment-channels {
+          channel-id: channel-id, 
+          participant-a: participant-a, 
+          participant-b: participant-b
+        }) 
+        ERR-CHANNEL-NOT-FOUND
+      ))
+      (total-channel-funds (get total-deposited channel))
     )
-    ;; This function needs to be redesigned for better security
-    ;; For now, we'll use a safer approach that requires the caller to know both participants
-    (err ERR-NOT-AUTHORIZED)
+    ;; Validation checks
+    (asserts! (is-valid-channel-id channel-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-signature signature) ERR-INVALID-INPUT)
+    (asserts! (> newer-nonce (get nonce channel)) ERR-INVALID-INPUT)
+    (asserts! (< stacks-block-height (get dispute-deadline channel)) ERR-DISPUTE-PERIOD)
+    
+    ;; Only participant-b can challenge (the one who didn't initiate unilateral close)
+    (asserts! (not is-caller-participant-a) ERR-NOT-AUTHORIZED)
+    
+    ;; Validate balance distribution
+    (asserts! 
+      (is-valid-balance-distribution newer-balance-a newer-balance-b total-channel-funds)
+      ERR-INSUFFICIENT-FUNDS
+    )
+
+    ;; Verify participant-a's signature on the newer state
+    (try! (verify-channel-state-signature channel-id newer-balance-a newer-balance-b newer-nonce signature participant-a))
+
+    ;; Update to the newer state
+    (map-set payment-channels 
+      {
+        channel-id: channel-id, 
+        participant-a: participant-a, 
+        participant-b: participant-b
+      }
+      (merge channel {
+        balance-a: newer-balance-a,
+        balance-b: newer-balance-b,
+        nonce: newer-nonce,
+        dispute-deadline: (+ stacks-block-height u1008) ;; Reset dispute period
+      })
+    )
+
+    (ok true)
   )
 )
 
