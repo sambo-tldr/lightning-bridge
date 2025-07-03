@@ -303,3 +303,141 @@
     (ok true)
   )
 )
+
+;; DISPUTE RESOLUTION MECHANISM
+
+;; Initiates unilateral channel closure with dispute arbitration
+;; Provides security against non-cooperative counterparties
+(define-public (initiate-unilateral-close 
+  (channel-id (buff 32)) 
+  (participant-b principal)
+  (proposed-balance-a uint)
+  (proposed-balance-b uint)
+  (signature (buff 65))
+)
+  (let 
+    (
+      (channel (unwrap! 
+        (map-get? payment-channels {
+          channel-id: channel-id, 
+          participant-a: tx-sender, 
+          participant-b: participant-b
+        }) 
+        ERR-CHANNEL-NOT-FOUND
+      ))
+      (total-channel-funds (get total-deposited channel))
+    )
+    ;; Enhanced input validation
+    (asserts! (is-valid-channel-id channel-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-signature signature) ERR-INVALID-INPUT)
+    (asserts! (not (is-eq tx-sender participant-b)) ERR-INVALID-INPUT)
+    (asserts! (get is-open channel) ERR-CHANNEL-CLOSED)
+
+    ;; Validate proposed balance distribution
+    (asserts! 
+      (is-valid-balance-distribution proposed-balance-a proposed-balance-b total-channel-funds)
+      ERR-INSUFFICIENT-FUNDS
+    )
+
+    ;; Use safe signature verification
+    (try! (verify-signature-safe proposed-balance-a proposed-balance-b channel-id signature tx-sender))
+
+    ;; Set dispute deadline (approximately 1 week in blocks)
+    (map-set payment-channels 
+      {
+        channel-id: channel-id, 
+        participant-a: tx-sender, 
+        participant-b: participant-b
+      }
+      (merge channel {
+        dispute-deadline: (+ stacks-block-height u1008),
+        balance-a: proposed-balance-a,
+        balance-b: proposed-balance-b
+      })
+    )
+
+    (ok true)
+  )
+)
+
+;; Finalizes unilateral closure after dispute period expires
+;; Executes the proposed settlement if unchallenged
+(define-public (resolve-unilateral-close 
+  (channel-id (buff 32)) 
+  (participant-b principal)
+)
+  (let 
+    (
+      (channel (unwrap! 
+        (map-get? payment-channels {
+          channel-id: channel-id, 
+          participant-a: tx-sender, 
+          participant-b: participant-b
+        }) 
+        ERR-CHANNEL-NOT-FOUND
+      ))
+      (proposed-balance-a (get balance-a channel))
+      (proposed-balance-b (get balance-b channel))
+    )
+    ;; Validation and timing checks
+    (asserts! (is-valid-channel-id channel-id) ERR-INVALID-INPUT)
+    (asserts! (not (is-eq tx-sender participant-b)) ERR-INVALID-INPUT)
+    (asserts! 
+      (>= stacks-block-height (get dispute-deadline channel)) 
+      ERR-DISPUTE-PERIOD
+    )
+    
+    ;; Additional balance validation before final settlement
+    (asserts! (is-valid-balance proposed-balance-a) ERR-BALANCE-OVERFLOW)
+    (asserts! (is-valid-balance proposed-balance-b) ERR-BALANCE-OVERFLOW)
+
+    ;; Execute final settlement
+    (try! (as-contract (stx-transfer? proposed-balance-a tx-sender tx-sender)))
+    (try! (as-contract (stx-transfer? proposed-balance-b tx-sender participant-b)))
+
+    ;; Close channel permanently
+    (map-set payment-channels 
+      {
+        channel-id: channel-id, 
+        participant-a: tx-sender, 
+        participant-b: participant-b
+      }
+      (merge channel {
+        is-open: false,
+        balance-a: u0,
+        balance-b: u0,
+        total-deposited: u0
+      })
+    )
+
+    (ok true)
+  )
+)
+
+;; QUERY INTERFACE
+
+;; Returns comprehensive channel state information
+;; Provides transparency for off-chain applications
+(define-read-only (get-channel-info 
+  (channel-id (buff 32)) 
+  (participant-a principal)
+  (participant-b principal)
+)
+  (map-get? payment-channels {
+    channel-id: channel-id, 
+    participant-a: participant-a, 
+    participant-b: participant-b
+  })
+)
+
+;; EMERGENCY PROTOCOLS
+
+;; Contract owner emergency withdrawal mechanism
+;; Provides last resort recovery for protocol upgrades or critical bugs
+(define-public (emergency-withdraw)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (try! (stx-transfer? (stx-get-balance (as-contract tx-sender)) (as-contract tx-sender) CONTRACT-OWNER))
+    (ok true)
+  )
+)
