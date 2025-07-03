@@ -108,6 +108,58 @@
   )
 )
 
+;; HELPER FUNCTIONS FOR SECURE CHANNEL OPERATIONS
+
+;; Securely retrieves and validates channel data
+(define-private (get-validated-channel
+  (channel-id (buff 32))
+  (participant-a principal)
+  (participant-b principal)
+)
+  (let 
+    (
+      (channel-data (map-get? payment-channels {
+        channel-id: channel-id, 
+        participant-a: participant-a, 
+        participant-b: participant-b
+      }))
+    )
+    (match channel-data
+      channel (if (and 
+                    (is-eq participant-a participant-a) ;; Redundant but explicit check
+                    (is-eq participant-b participant-b)
+                  )
+                  (some channel)
+                  none)
+      none
+    )
+  )
+)
+
+;; Validates that a principal is a legitimate participant in a channel
+(define-private (is-channel-participant
+  (channel-id (buff 32))
+  (participant principal)
+)
+  (let 
+    (
+      ;; Try to find channel with participant as participant-a
+      (channel-as-a (map-get? payment-channels {
+        channel-id: channel-id, 
+        participant-a: participant, 
+        participant-b: tx-sender
+      }))
+      ;; Try to find channel with participant as participant-b  
+      (channel-as-b (map-get? payment-channels {
+        channel-id: channel-id, 
+        participant-a: tx-sender, 
+        participant-b: participant
+      }))
+    )
+    (or (is-some channel-as-a) (is-some channel-as-b))
+  )
+)
+
 ;; CRYPTOGRAPHIC UTILITIES
 
 ;; Converts unsigned integer to buffer for signature operations
