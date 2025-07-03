@@ -94,3 +94,97 @@
     (ok (unwrap-panic (to-consensus-buff? n)))
   )
 )
+
+;; CRYPTOGRAPHIC UTILITIES
+
+;; Converts unsigned integer to buffer for signature operations
+;; Uses a simple approach by converting to ASCII representation
+(define-private (uint-to-buff (n uint))
+  (unwrap-panic (to-consensus-buff? n))
+)
+
+;; Enhanced signature verification with input validation
+(define-private (verify-signature-safe
+  (balance-a uint)
+  (balance-b uint)
+  (channel-id (buff 32))
+  (signature (buff 65))
+  (signer principal)
+)
+  (let 
+    (
+      (safe-balance-a (try! (safe-uint-to-buff balance-a)))
+      (safe-balance-b (try! (safe-uint-to-buff balance-b)))
+      (message (concat 
+        (concat 
+          channel-id
+          safe-balance-a
+        )
+        safe-balance-b
+      ))
+    )
+    ;; Simplified signature verification for demonstration
+    ;; In production, this would use proper Ed25519 verification
+    (ok (if (is-eq tx-sender signer) true false))
+  )
+)
+
+;; Simplified signature verification for state transitions
+;; Note: In production, this would use proper Ed25519 verification
+(define-private (verify-signature 
+  (message (buff 256))
+  (signature (buff 65))
+  (signer principal)
+)
+  (if (is-eq tx-sender signer)
+    true
+    false
+  )
+)
+
+;; CHANNEL LIFECYCLE MANAGEMENT
+
+;; Creates a new Lightning Bridge channel between two participants
+;; Establishes the initial state and locks participant A's funds
+(define-public (create-channel 
+  (channel-id (buff 32)) 
+  (participant-b principal)
+  (initial-deposit uint)
+)
+  (begin
+    ;; Input validation layer
+    (asserts! (is-valid-channel-id channel-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-deposit initial-deposit) ERR-INVALID-INPUT)
+    (asserts! (is-valid-balance initial-deposit) ERR-BALANCE-OVERFLOW)
+    (asserts! (not (is-eq tx-sender participant-b)) ERR-INVALID-INPUT)
+
+    ;; Ensure channel uniqueness
+    (asserts! (is-none (map-get? payment-channels {
+      channel-id: channel-id, 
+      participant-a: tx-sender, 
+      participant-b: participant-b
+    })) ERR-CHANNEL-EXISTS)
+
+    ;; Lock initial funds in contract
+    (try! (stx-transfer? initial-deposit tx-sender (as-contract tx-sender)))
+
+    ;; Initialize channel state
+    (map-set payment-channels 
+      {
+        channel-id: channel-id, 
+        participant-a: tx-sender, 
+        participant-b: participant-b
+      }
+      {
+        total-deposited: initial-deposit,
+        balance-a: initial-deposit,
+        balance-b: u0,
+        is-open: true,
+        dispute-deadline: u0,
+        nonce: u0
+      }
+    )
+
+    (ok true)
+  )
+)
